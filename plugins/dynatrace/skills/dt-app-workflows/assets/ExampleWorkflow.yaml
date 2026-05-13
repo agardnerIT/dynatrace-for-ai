@@ -1,0 +1,69 @@
+# Example workflow: hourly DQL query → conditional email.
+#
+# Pattern this demonstrates:
+#   - Scheduled cron trigger (top of every hour, UTC)
+#   - execute-dql-query task with explicit `from: now() - 10m` window
+#   - Null-safe filtering for stale series
+#   - send-email task gated by Jinja `custom:` condition on record count
+#   - Inline `{% for %}` templating in the email body
+#
+# To deploy as a new workflow:
+#   dtctl apply -f ExampleWorkflow.yaml --write-id -o yaml --plain
+# Then verify:
+#   dtctl exec workflow <id> --wait --show-results --timeout 5m -o yaml --plain
+
+title: Example — Scheduled query → email alert
+description: Hourly check; emails the recipient when the query returns any records.
+private: false
+tasks:
+  query_task:
+    name: query_task
+    description: Find records of interest.
+    action: dynatrace.automations:execute-dql-query
+    input:
+      query: |
+        timeseries v=avg(my.metric), by:{name, namespace}, from: now() - 10m
+        | fieldsAdd last_val = arrayLast(v)
+        | filter isNotNull(last_val)
+        | filter last_val > 100
+        | fields name, namespace, last_val
+        | sort last_val desc
+    position:
+      x: 0
+      y: 1
+    predecessors: []
+  send_email:
+    name: send_email
+    description: Email only if at least one record matched.
+    action: dynatrace.email:send-email
+    conditions:
+      states:
+        query_task: OK
+      custom: "{{ result('query_task').records | length > 0 }}"
+    input:
+      to:
+        - user@example.com
+      cc: []
+      bcc: []
+      subject: "Alert: {{ result('query_task').records | length }} item(s) over threshold"
+      content: |
+        The following items exceeded threshold:
+
+        {% for row in result('query_task').records %}
+        - {{ row.namespace }}/{{ row.name }}: {{ row.last_val }}
+        {% endfor %}
+    position:
+      x: 0
+      y: 2
+    predecessors:
+      - query_task
+trigger:
+  schedule:
+    isActive: true
+    isFaulty: false
+    nextExecution: null
+    rule: null                       # NOT a cron string — Business Calendar UUID or null
+    timezone: UTC
+    trigger:
+      type: cron
+      cron: "0 * * * *"
